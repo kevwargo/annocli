@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
 setup(
-    name="decocli",
+    name="annocli",
     packages=find_packages(),
 )
