@@ -1,15 +1,19 @@
+__all__ = ("entrypoint", "Arg", "Namespace")
+
 import typing
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser
 from functools import wraps
 from inspect import FullArgSpec, getfullargspec
 from types import NoneType, UnionType
 
+from annocli.namespace import Arg, Namespace
 
-def cli(fn: typing.Callable) -> typing.Callable:
+
+def entrypoint(fn: typing.Callable) -> typing.Callable:
     spec = getfullargspec(fn)
 
-    if ns_class := _single_ns_arg_annotation(spec):
-        args, kwargs = [_parse_ns_args(ns_class)], {}
+    if spec := _parse_single_ns_arg(spec):
+        args, kwargs = spec
     else:
         args, kwargs = _parse_func_args(spec)
 
@@ -20,21 +24,15 @@ def cli(fn: typing.Callable) -> typing.Callable:
     return wrapped
 
 
-def _single_ns_arg_annotation(spec: FullArgSpec) -> typing.Type[Namespace] | None:
+def _parse_single_ns_arg(spec: FullArgSpec) -> tuple[list, dict] | None:
     if len(spec.args) != 1:
         return None
 
     if annotation := spec.annotations.get(spec.args[0]):
         if isinstance(annotation, type) and issubclass(annotation, Namespace):
-            return annotation
+            return [annotation.__parse__()], {}
 
     return None
-
-
-def _parse_ns_args(ns_class: typing.Type[Namespace]) -> Namespace:
-    parser = _build_parser(ns_class.__dict__, ns_class.__annotations__)
-
-    return parser.parse_args(namespace=ns_class())
 
 
 def _parse_func_args(spec: FullArgSpec) -> tuple[list, dict]:
