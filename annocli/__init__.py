@@ -12,8 +12,8 @@ from annocli.namespace import Arg, Namespace
 def entrypoint(fn: typing.Callable) -> typing.Callable:
     spec = getfullargspec(fn)
 
-    if spec := _parse_single_ns_arg(spec):
-        args, kwargs = spec
+    if ns := _parse_single_ns_arg(spec):
+        args, kwargs = (ns,), {}
     else:
         args, kwargs = _parse_func_args(spec)
 
@@ -24,13 +24,13 @@ def entrypoint(fn: typing.Callable) -> typing.Callable:
     return wrapped
 
 
-def _parse_single_ns_arg(spec: FullArgSpec) -> tuple[list, dict] | None:
+def _parse_single_ns_arg(spec: FullArgSpec) -> Namespace | None:
     if len(spec.args) != 1:
         return None
 
     if annotation := spec.annotations.get(spec.args[0]):
         if isinstance(annotation, type) and issubclass(annotation, Namespace):
-            return [annotation.__parse__()], {}
+            return annotation.__parse__()
 
     return None
 
