@@ -76,6 +76,8 @@ class Namespace(argparse.Namespace, metaclass=_NSMeta):
     __annotated_args__: dict[str, type]
     __custom_args__: dict[str, Arg]
 
+    __verbose_parse__ = False
+
     def __init__(self):
         parser = argparse.ArgumentParser()
 
@@ -122,6 +124,8 @@ class Namespace(argparse.Namespace, metaclass=_NSMeta):
             if not args or _alias_only(args):
                 args += ("--" + name.replace("_", "-"),)
 
+            if self.__verbose_parse__:
+                print(f"adding argument (*{args}, **{kwargs})")
             parser.add_argument(*args, **kwargs)
 
         parser.parse_args(namespace=self)
