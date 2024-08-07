@@ -1,7 +1,7 @@
 __all__ = ("Arg", "Namespace")
 
 import argparse
-from types import NoneType, UnionType
+from types import GenericAlias, NoneType, UnionType
 from typing import Any
 
 
@@ -31,7 +31,7 @@ class _AttributeRecorder(dict):
         else:
             self.record(k)
 
-            if type(v) is Arg:
+            if isinstance(v, Arg):
                 self._custom[k] = v
             else:
                 self._defaults[k] = v
@@ -59,7 +59,7 @@ class _AnnotationsRecorder(dict):
 
 
 class _NSMeta(type):
-    def __init__(cls, name, bases, body):
+    def __init__(cls, name, bases, body: _AttributeRecorder):
         cls.__arg_names__ = body._names
         cls.__default_args__ = body._defaults
         cls.__annotated_args__ = body._annotations
@@ -91,46 +91,68 @@ class Namespace(argparse.Namespace, metaclass=_NSMeta):
             elif custom := self.__custom_args__.get(name):
                 args, kwargs = custom.args, custom.kwargs
                 if custom.positional:
-                    args = (name,)
+                    if not args:
+                        args = (name,)
                     positional = True
                 else:
                     kwargs["dest"] = name
 
             if annotation := self.__annotated_args__.get(name):
-                annotation, optional = self._parse_annotation(annotation)
-                if not positional and annotation is bool:
+                annotation, optional = _unwrap_optional(annotation)
+
+                if list_element_annotation := _unwrap_list_type(annotation):
+                    annotation = list_element_annotation
+                    if positional:
+                        kwargs.setdefault("nargs", argparse.ZERO_OR_MORE if optional else argparse.ONE_OR_MORE)
+                    else:
+                        kwargs["action"] = "append"
+                    kwargs["type"] = annotation
+                elif not positional and annotation is bool:
                     kwargs["action"] = "store_true"
                 else:
                     kwargs["type"] = annotation
 
             if positional:
-                if optional and "nargs" not in kwargs:
-                    kwargs["nargs"] = argparse.OPTIONAL
+                if optional:
+                    kwargs.setdefault("nargs", argparse.OPTIONAL)
             else:
                 if not optional and "default" not in kwargs:
                     kwargs["required"] = True
 
-            if not args or self._alias_only(args):
+            if not args or _alias_only(args):
                 args += ("--" + name.replace("_", "-"),)
 
             parser.add_argument(*args, **kwargs)
 
         parser.parse_args(namespace=self)
 
-    @staticmethod
-    def _parse_annotation(annotation: type | UnionType) -> tuple[type, bool]:
-        if not isinstance(annotation, UnionType):
-            return annotation, annotation is bool
 
-        if len(annotation.__args__) == 2 and annotation.__args__[1] is NoneType:
-            return annotation.__args__[0], True
+def _unwrap_optional(annotation: type | UnionType) -> tuple[type, bool]:
+    if not isinstance(annotation, UnionType):
+        return annotation, annotation is bool
 
-        return annotation, False
+    if len(annotation.__args__) == 2 and annotation.__args__[1] is NoneType:
+        return annotation.__args__[0], True
 
-    @staticmethod
-    def _alias_only(args: tuple) -> bool:
-        if not args or len(args) != 1:
-            return False
+    return annotation, False
 
-        a = args[0]
-        return len(a) == 2 and a[0] == "-" and a[1] != "-"
+
+def _unwrap_list_type(annotation: type | GenericAlias) -> type | None:
+    if not isinstance(annotation, GenericAlias):
+        return None
+
+    if annotation.__origin__ is not list:
+        return None
+
+    if len(annotation.__args__) != 1:
+        raise TypeError(f"Invalid number of arguments to list declaration {annotation}: {len(annotation.__args__)}")
+
+    return annotation.__args__[0]
+
+
+def _alias_only(args: tuple) -> bool:
+    if not args or len(args) != 1:
+        return False
+
+    a = args[0]
+    return len(a) == 2 and a[0] == "-" and a[1] != "-"
