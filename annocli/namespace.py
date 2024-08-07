@@ -76,20 +76,19 @@ class Namespace(argparse.Namespace, metaclass=_NSMeta):
     __annotated_args__: dict[str, type]
     __custom_args__: dict[str, Arg]
 
-    @classmethod
-    def __parse__(cls):
+    def __init__(self):
         parser = argparse.ArgumentParser()
 
-        for name in cls.__arg_names__:
+        for name in self.__arg_names__:
             args = ()
             kwargs = {}
 
             positional = False
             optional = True
 
-            if default := cls.__default_args__.get(name):
+            if default := self.__default_args__.get(name):
                 kwargs["default"] = default
-            elif custom := cls.__custom_args__.get(name):
+            elif custom := self.__custom_args__.get(name):
                 args, kwargs = custom.args, custom.kwargs
                 if custom.positional:
                     args = (name,)
@@ -97,8 +96,8 @@ class Namespace(argparse.Namespace, metaclass=_NSMeta):
                 else:
                     kwargs["dest"] = name
 
-            if annotation := cls.__annotated_args__.get(name):
-                annotation, optional = cls._parse_annotation(annotation)
+            if annotation := self.__annotated_args__.get(name):
+                annotation, optional = self._parse_annotation(annotation)
                 if not positional and annotation is bool:
                     kwargs["action"] = "store_true"
                 else:
@@ -111,12 +110,12 @@ class Namespace(argparse.Namespace, metaclass=_NSMeta):
                 if not optional and "default" not in kwargs:
                     kwargs["required"] = True
 
-            if not args or cls._alias_only(args):
+            if not args or self._alias_only(args):
                 args += ("--" + name.replace("_", "-"),)
 
             parser.add_argument(*args, **kwargs)
 
-        return parser.parse_args(namespace=cls())
+        parser.parse_args(namespace=self)
 
     @staticmethod
     def _parse_annotation(annotation: type | UnionType) -> tuple[type, bool]:
