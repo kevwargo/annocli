@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from annocli import Arg, Namespace
+from annocli import Arg, Namespace, entrypoint
 
 
 class DDBQueryArgs(Namespace):
@@ -17,5 +17,10 @@ class DDBQueryArgs(Namespace):
     raw: bool
 
 
-a = DDBQueryArgs()
-print(a)
+@entrypoint
+def main(args: DDBQueryArgs):
+    print(args)
+
+
+if __name__ == "__main__":
+    main()
