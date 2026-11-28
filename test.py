@@ -14,6 +14,7 @@ class DDBQueryArgs(Namespace):
     sort_expr: str | None = Arg(positional=True)
     items: list[str] | None = Arg(action="append")
     output: Path | None = Arg("-o")
+    raw: bool
 
 
 a = DDBQueryArgs()

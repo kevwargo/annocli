@@ -101,6 +101,9 @@ class _Attr:
         if self.list_type:
             return []
 
+        if self.is_bool:
+            return False
+
     @cached_property
     def args(self) -> list[str]:
         if self.custom:
@@ -129,7 +132,7 @@ class _Attr:
     @cached_property
     def kwargs(self):
         return {
-            **({"type": self.resolved_type} if self.resolved_type else {}),
+            **({"type": self.resolved_type} if self.resolved_type and not self.is_bool else {}),
             **({"action": self.action} if self.action else {}),
             **({"required": True} if self.required and not self.positional else {}),
             **({"default": self.default} if self.has_default else {}),
@@ -153,6 +156,10 @@ class _Attr:
         return self.anno
 
     @cached_property
+    def is_bool(self) -> bool:
+        return self.resolved_type is bool and not self.list_type
+
+    @cached_property
     def optional_type(self) -> type[Any] | None:
         if not self.has_anno:
             return None
@@ -167,7 +174,7 @@ class _Attr:
         if self.custom and (act := self.custom.kwargs.get("action")):
             return act
 
-        if self.resolved_type is bool:
+        if self.is_bool:
             return "store_true"
 
     @cached_property
@@ -175,7 +182,7 @@ class _Attr:
         if self.custom and (req := self.custom.kwargs.get("required")):
             return req
 
-        if self.optional_type:
+        if self.optional_type or self.is_bool:
             return False
 
         return not self.has_default
