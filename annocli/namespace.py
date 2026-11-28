@@ -1,162 +1,218 @@
 __all__ = ("Arg", "Namespace")
 
 import argparse
+import sys
+from copy import copy
+from functools import cached_property
 from types import GenericAlias, NoneType, UnionType
-from typing import Any
+from typing import Any, Iterable, Iterator, get_type_hints
+
+
+class Namespace(argparse.Namespace):
+    __verbose_parse__ = False
+
+    def __init__(self, argv=None):
+        parser = argparse.ArgumentParser()
+
+        cls = type(self)
+        cls_dict = cls.__dict__
+        cls_annotations = get_type_hints(cls)
+
+        for name in _filter_names(cls_dict | cls_annotations):
+            attr = _Attr(name, cls_dict, cls_annotations)
+
+            if self.__verbose_parse__:
+                args_repr = ", ".join(map(repr, attr.args))
+                kwargs_repr = ", ".join(f"{k}={v!r}" for k, v in attr.kwargs.items())
+                print(f"parser.add_argument({args_repr}, {kwargs_repr})", file=sys.stderr)
+
+            parser.add_argument(*attr.args, **attr.kwargs)
+
+        parser.parse_args(argv, namespace=self)
+
+    def __getattribute__(self, name):
+        v = super().__getattribute__(name)
+        if name.startswith("_"):
+            return v
+
+        if name not in self.__dict__:
+            if isinstance(v, Arg):
+                try:
+                    v = v.kwargs["default"]
+                except KeyError:
+                    raise AttributeError(f"Attribute {name!r} is not set") from None
+
+            vcopy = copy(v)
+            if self.__verbose_parse__:
+                print(f"setting default {name} = {v!r}({hex(id(v))} -> {hex(id(vcopy))})", file=sys.stderr)
+
+            setattr(self, name, vcopy)
+
+        return v
 
 
 class Arg:
     def __init__(self, *args, positional=False, **kwargs):
-        self.args = args
+        self.args = list(args)
         self.kwargs = kwargs
         self.positional = positional
 
 
-class _AttributeRecorder(dict):
-    def __init__(self):
-        super().__init__()
+class _Attr:
+    def __init__(self, name: str, cls_dict: dict, cls_annotations: dict):
+        self.name = name
+        self.cls_dict = cls_dict
+        self.cls_annotations = cls_annotations
 
-        self._names = []
-        self._defaults = {}
-        self._annotations = {}
-        self._custom = {}
+    @cached_property
+    def has_anno(self) -> bool:
+        return self.name in self.cls_annotations
 
-        self._annotations_recorder = _AnnotationsRecorder(self)
+    @cached_property
+    def anno(self) -> Any:
+        return self.cls_annotations[self.name]
 
-    def __setitem__(self, k, v):
-        if k.startswith("_"):
-            if k == "__annotations__":
-                v = self._annotations_recorder
-            super().__setitem__(k, v)
+    @cached_property
+    def custom(self) -> Arg | None:
+        if (arg := self.cls_dict.get(self.name)) and isinstance(arg, Arg):
+            return arg
+
+        return None
+
+    @cached_property
+    def has_default(self) -> bool:
+        if self.optional_type:
+            return True
+
+        if self.custom:
+            if "default" in self.custom.kwargs:
+                return True
         else:
-            self.record(k)
+            return self.name in self.cls_dict
 
-            if isinstance(v, Arg):
-                self._custom[k] = v
-            else:
-                self._defaults[k] = v
+    @cached_property
+    def default(self) -> Any:
+        if self.custom:
+            if "default" in self.custom.kwargs:
+                return self.custom.kwargs["default"]
+        elif self.name in self.cls_dict:
+            return self.cls_dict[self.name]
 
-    def record(self, name):
-        if name not in self._names:
-            self._names.append(name)
+        if self.list_type:
+            return []
 
+    @cached_property
+    def args(self) -> list[str]:
+        if self.custom:
+            if self.custom.positional:
+                return self.custom.args or [self.name]
 
-class _AnnotationsRecorder(dict):
-    def __init__(self, attr_recorder: _AttributeRecorder):
-        super().__init__()
-        self._attr_recorder = attr_recorder
+            if self.shorts_only:
+                return [*self.custom.args, self.dash_arg]
+            elif self.custom.args:
+                return self.custom.args
 
-    def __setitem__(self, k, v):
-        super().__setitem__(k, v)
+        return [self.dash_arg]
 
-        if not k.startswith("_"):
-            self._attr_recorder.record(k)
+    @cached_property
+    def dash_arg(self) -> str:
+        name = self.name.rstrip("_").replace("_", "-")
+        return f"--{name}"
 
-            if type(v) is Arg:
-                self._attr_recorder._custom[k] = v
-            else:
-                self._attr_recorder._annotations[k] = v
+    @cached_property
+    def shorts_only(self) -> bool:
+        if not (self.custom and self.custom.args):
+            return False
 
+        return all(len(a) == 2 and a[0] == "-" and a[1].isalnum() for a in self.custom.args)
 
-class _NSMeta(type):
-    def __init__(cls, name, bases, body: _AttributeRecorder):
-        cls.__arg_names__ = body._names
-        cls.__default_args__ = body._defaults
-        cls.__annotated_args__ = body._annotations
-        cls.__custom_args__ = body._custom
+    @cached_property
+    def kwargs(self):
+        return {
+            **({"type": self.resolved_type} if self.resolved_type else {}),
+            **({"action": self.action} if self.action else {}),
+            **({"required": True} if self.required and not self.positional else {}),
+            **({"default": self.default} if self.has_default else {}),
+            **({"nargs": self.nargs} if self.nargs else {}),
+        }
 
-    @classmethod
-    def __prepare__(*args, **kwargs):
-        return _AttributeRecorder()
+    @cached_property
+    def resolved_type(self) -> type[Any] | None:
+        if self.custom and (typ := self.custom.kwargs.get("type")):
+            return typ
 
+        if not self.has_anno:
+            return None
 
-class Namespace(argparse.Namespace, metaclass=_NSMeta):
-    __arg_names__: list[str]
-    __default_args__: dict[str, Any]
-    __annotated_args__: dict[str, type]
-    __custom_args__: dict[str, Arg]
+        if self.list_type:
+            return self.list_type
 
-    __verbose_parse__ = False
+        if self.optional_type:
+            return self.optional_type
 
-    def __init__(self):
-        parser = argparse.ArgumentParser()
+        return self.anno
 
-        for name in self.__arg_names__:
-            args = ()
-            kwargs = {}
+    @cached_property
+    def optional_type(self) -> type[Any] | None:
+        if not self.has_anno:
+            return None
 
-            positional = False
-            optional = True
+        if isinstance(self.anno, UnionType) and len((args := self.anno.__args__)) == 2 and args[1] is NoneType:
+            return args[0]
 
-            if default := self.__default_args__.get(name):
-                kwargs["default"] = default
-            elif custom := self.__custom_args__.get(name):
-                args, kwargs = custom.args, custom.kwargs
-                if custom.positional:
-                    if not args:
-                        args = (name,)
-                    positional = True
-                else:
-                    kwargs["dest"] = name
-
-            if annotation := self.__annotated_args__.get(name):
-                annotation, optional = _unwrap_optional(annotation)
-
-                if list_element_annotation := _unwrap_list_type(annotation):
-                    annotation = list_element_annotation
-                    if positional:
-                        kwargs.setdefault("nargs", argparse.ZERO_OR_MORE if optional else argparse.ONE_OR_MORE)
-                    else:
-                        kwargs["action"] = "append"
-                    kwargs["type"] = annotation
-                elif not positional and annotation is bool:
-                    kwargs["action"] = "store_true"
-                else:
-                    kwargs["type"] = annotation
-
-            if positional:
-                if optional:
-                    kwargs.setdefault("nargs", argparse.OPTIONAL)
-            else:
-                if not optional and "default" not in kwargs:
-                    kwargs["required"] = True
-
-            if not args or _alias_only(args):
-                args += ("--" + name.replace("_", "-"),)
-
-            if self.__verbose_parse__:
-                print(f"adding argument (*{args}, **{kwargs})")
-            parser.add_argument(*args, **kwargs)
-
-        parser.parse_args(namespace=self)
-
-
-def _unwrap_optional(annotation: type | UnionType) -> tuple[type, bool]:
-    if not isinstance(annotation, UnionType):
-        return annotation, annotation is bool
-
-    if len(annotation.__args__) == 2 and annotation.__args__[1] is NoneType:
-        return annotation.__args__[0], True
-
-    return annotation, False
-
-
-def _unwrap_list_type(annotation: type | GenericAlias) -> type | None:
-    if not isinstance(annotation, GenericAlias):
         return None
 
-    if annotation.__origin__ is not list:
-        return None
+    @cached_property
+    def action(self) -> str | None:
+        if self.custom and (act := self.custom.kwargs.get("action")):
+            return act
 
-    if len(annotation.__args__) != 1:
-        raise TypeError(f"Invalid number of arguments to list declaration {annotation}: {len(annotation.__args__)}")
+        if self.resolved_type is bool:
+            return "store_true"
 
-    return annotation.__args__[0]
+    @cached_property
+    def required(self) -> bool:
+        if self.custom and (req := self.custom.kwargs.get("required")):
+            return req
+
+        if self.optional_type:
+            return False
+
+        return not self.has_default
+
+    @cached_property
+    def list_type(self) -> type[Any] | None:
+        if not self.has_anno:
+            return None
+
+        anno = self.optional_type or self.anno
+
+        if not (isinstance(anno, GenericAlias) and issubclass(anno.__origin__, list)):
+            return None
+
+        if len(anno.__args__) != 1:
+            raise TypeError(f"Invalid list generic: {anno}")
+
+        return anno.__args__[0]
+
+    @cached_property
+    def positional(self) -> bool:
+        return self.custom and self.custom.positional
+
+    @cached_property
+    def nargs(self) -> str | None:
+        if self.custom and "nargs" in self.custom.kwargs:
+            return self.custom.kwargs["nargs"]
+
+        if self.action == "append":
+            return None
+
+        if self.list_type:
+            return "+" if self.required else "*"
+
+        if self.positional and not self.required:
+            return "?"
 
 
-def _alias_only(args: tuple) -> bool:
-    if not args or len(args) != 1:
-        return False
-
-    a = args[0]
-    return len(a) == 2 and a[0] == "-" and a[1] != "-"
+def _filter_names(names: Iterable[str]) -> Iterator[str]:
+    return (n for n in names if not n.startswith("_"))
